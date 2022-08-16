@@ -1,6 +1,7 @@
 # Conveyor-X-Firmware
 
-`Conveyor X` is a product of `IMWI Technology Company`. It was open source in March 2020.
+> `Conveyor X` is a product of `IMWI Technology Company`. It was open source in March 2020.
+> We have 2 length size model: `Short Conveyor` with `500mm` length and `Long Conveyor` with `1000mm` length.
 
 ![Xconveyor](./images/XConveyor.png)
 
