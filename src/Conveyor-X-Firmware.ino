@@ -14,8 +14,8 @@
 // stepper timer parameters
 #define COMPARE_VALUE_TIMER OCR1A
 
-#define TurnOnStepperTimer (TIMSK1 |= (1 << OCIE1A))
-#define TurnOffStepperTimer (TIMSK1 &= ~(1 << OCIE1A))
+#define ResumeStepperTimer (TIMSK1 |= (1 << OCIE1A))
+#define StopStepperTimer (TIMSK1 &= ~(1 << OCIE1A))
 
 #define READ_VOLUME_TIME_MS 10
 
@@ -42,21 +42,19 @@
 #define PULSE_PER_MM_ADDRESS 10
 #define DEFAULT_PULSE_PER_MM 10.24f
 
-#define TurnOnEncoderTimer (TIMSK2 |= (1 << OCIE2A))
-#define TurnOffEncoderTimer (TIMSK2 &= ~(1 << OCIE2A))
+#define ResumeEncoderTimer (TIMSK2 |= (1 << OCIE2A))
+#define StopEncoderTimer (TIMSK2 &= ~(1 << OCIE2A))
 
 // #define INVERT_STEPPER_DIR
 // #define INVERT_ENCODER_DIR
 
 String inputString;
 bool stringComplete;
-bool Mode;
 float DesireSpeed;
 float DesirePosition;
 long DesireStepPosition;
 long CurrentStepPosition;
 float OldSpeed;
-unsigned long ReadVolumeMillis;
 unsigned long LedBlinkMillis;
 
 byte VolumeValueCounter;
@@ -77,8 +75,10 @@ float pulse_per_mm;
 bool e_stt;
 bool is_auto_send_e_stt;
 bool is_absolute_mode = true;
-volatile bool is_timer_running = false;
+volatile bool is_encoder_timer_running = false;
 bool led_stt = false;
+
+float S, R, E, P;
 
 void setup()
 {
@@ -90,7 +90,6 @@ void setup()
 
 void loop()
 {
-  readVolume();
   SerialExecute();
   LedBlink();
 }
@@ -139,14 +138,9 @@ void InitData()
 {
   COMMAND_PORT.begin(115200);
   EEPROM.begin();
-
-  Mode = SERIAL_MODE;
-  // COMMAND_PORT.println("Begin:");
   OldSpeed = DEFAULT_SPEED;
-
   get(PULSE_PER_MM_ADDRESS, pulse_per_mm);
   delay(100);
-  // COMMAND_PORT.println(pulse_per_mm);
 }
 
 void StepperTimerInit()
@@ -165,7 +159,7 @@ void StepperTimerInit()
 
   interrupts();
 
-  TurnOffStepperTimer;
+  StopStepperTimer;
 }
 
 // set the timer interrupt cycle at 1ms
@@ -179,7 +173,7 @@ void EncoderTimerInit()
 
   interrupts();
 
-  TurnOffEncoderTimer;
+  StopEncoderTimer;
   setEncoderTimerPeriod(1000);
 }
 
@@ -199,58 +193,10 @@ void LedBlink()
   }
 }
 
-void readVolume()
-{
-  if (Mode != VOLUME_MODE)
-    return;
-
-  if (millis() - ReadVolumeMillis < READ_VOLUME_TIME_MS)
-    return;
-
-  ReadVolumeMillis = millis();
-
-  VolumeValueCounter++;
-  VolumeValue += map(analogRead(VOLUME_PIN), 0, 1023, -MAX_SPEED, MAX_SPEED);
-
-  if (VolumeValueCounter == 10)
-  {
-    DesireSpeed = VolumeValue / 10.0;
-    if (DesireSpeed < 0.05 && DesireSpeed > -0.05)
-    {
-      DesireSpeed = 0;
-    }
-
-    if (DesireSpeed > 0)
-    {
-      setStepperTimerPeriod(SPEED_TO_CYCLE(DesireSpeed));
-      TurnOnStepperTimer;
-      // digitalWrite(EN_PIN, 0);
-
-#ifdef INVERT_STEPPER_DIR
-      digitalWrite(DIR_PIN, 0);
-#else
-      digitalWrite(DIR_PIN, 1);
-#endif
-    }
-    else
-    {
-      TurnOffStepperTimer;
-      // digitalWrite(EN_PIN, 1);
-    }
-
-    VolumeValueCounter = 0;
-    VolumeValue = 0;
-  }
-}
-
 void ConveyorExecute()
 {
-  if (Mode != SERIAL_MODE)
-  {
-    return;
-  }
 
-  if (DesireSpeed < 0.01 && DesireSpeed > -0.01)
+  if (DesireSpeed < 0.02 && DesireSpeed > -0.02)
   {
     DesireSpeed = 0;
   }
@@ -276,12 +222,7 @@ void ConveyorExecute()
 #endif
 
   DesireSpeed = abs(DesireSpeed);
-  if (DesireSpeed > MAX_SPEED)
-  {
-    DesireSpeed = MAX_SPEED;
-  }
   setStepperTimerPeriod(SPEED_TO_CYCLE(DesireSpeed));
-
   DesireStepPosition += roundf(DesirePosition * STEP_PER_MM);
   DesirePosition = 0;
 
@@ -314,13 +255,11 @@ void ConveyorExecute()
 
   if (DesireSpeed == 0 && DesireStepPosition == 0)
   {
-    TurnOffStepperTimer;
-    // digitalWrite(EN_PIN, 1);
+    StopStepperTimer;
     return;
   }
 
-  TurnOnStepperTimer;
-  // digitalWrite(EN_PIN, 0);
+  ResumeStepperTimer;
 }
 
 // intCycle us
@@ -385,7 +324,7 @@ ISR(TIMER1_COMPA_vect)
     if (DesireStepPosition == CurrentStepPosition)
     {
       COMMAND_PORT.println("Ok");
-      TurnOffStepperTimer;
+      StopStepperTimer;
       DesireStepPosition = 0;
       CurrentStepPosition = 0;
       // digitalWrite(EN_PIN, 1);
@@ -395,13 +334,13 @@ ISR(TIMER1_COMPA_vect)
 
 ISR(TIMER2_COMPA_vect)
 {
-  if (!is_timer_running)
+  if (!is_encoder_timer_running)
     return;
 
   if (timer2_loop_index == timer2_loop_num)
   {
     timer2_loop_index = 1;
-    
+
     timer_counter += 1;
     if (timer_counter == period)
     {
@@ -459,22 +398,19 @@ void SerialExecute()
   }
 
   String messageBuffer = inputString.substring(0, 4);
-
   if (messageBuffer == "M310")
   {
-    if (inputString.substring(5).toInt() == SERIAL_MODE)
+    float mode = inputString.substring(5).toFloat();
+    if (int(mode) < 3 && int(mode) > 0)
     {
-      Mode = SERIAL_MODE;
-      DesireSpeed = 0;
+      mode = int(mode);
+      COMMAND_PORT.println("Ok");
     }
-    if (inputString.substring(5).toInt() == VOLUME_MODE)
+    else
     {
-      Mode = VOLUME_MODE;
-      DesirePosition = 0;
+      COMMAND_PORT.println("Unknown: Invalid mode!");
     }
-    COMMAND_PORT.println("Ok");
   }
-
   else if (messageBuffer == "M311")
   {
     float speed = inputString.substring(5).toFloat();
@@ -510,6 +446,10 @@ void SerialExecute()
     {
       COMMAND_PORT.println("Error: Exceeds max speed!");
     }
+  }
+  else if (messageBuffer == "M315")
+  {
+    
   }
   else if (messageBuffer == "M316")
   {
@@ -548,15 +488,15 @@ void SerialExecute()
     }
     else
     {
-      is_timer_running = false;
-      TurnOffEncoderTimer;
+      is_encoder_timer_running = false;
+      StopEncoderTimer;
       int _per = inputString.substring(6).toInt(); // eg: "M317 T100" -> period = 100
       if (_per > 50)
       {
         period = _per;
         timer_counter = 0;
-        is_timer_running = true;
-        TurnOnEncoderTimer;
+        is_encoder_timer_running = true;
+        ResumeEncoderTimer;
       }
       else
       {
